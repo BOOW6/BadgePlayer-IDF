@@ -1,0 +1,11 @@
+menu "Badge Player"
+
+config BADGE_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config BADGE_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+
+endmenu

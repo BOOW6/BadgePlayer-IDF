@@ -1,0 +1,12 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "gdbtarget",
+      "request": "attach",
+      "name": "ESP-IDF: Debug",
+      "preLaunchTask": "ESP-IDF: build",
+      "program": "${workspaceFolder}/build/BadgePlayer-IDF.elf"
+    }
+  ]
+}
