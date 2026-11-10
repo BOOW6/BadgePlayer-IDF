@@ -61,7 +61,7 @@ typedef struct {
 static const song_entry_t SONGS[] = {
     {"53:25:4E:F7:32:00:01",
      "http://music.163.com/song/media/outer/url?id=1330348068.mp3", "起风了"},
-    {"53:53:6A:F7:32:00:01",
+    {"53:03:5D:10:76:00:01",
      "http://music.163.com/song/media/outer/url?id=1962556941.mp3", "无羁"},
     {"53:09:8B:F7:32:00:01",
      "http://music.163.com/song/media/outer/url?id=569214252.mp3",
@@ -177,7 +177,7 @@ static void motor_clockwise(void)
 {
     ESP_ERROR_CHECK(gpio_set_level(MOTOR_AIN1_GPIO, 1));
     ESP_ERROR_CHECK(gpio_set_level(MOTOR_AIN2_GPIO, 0));
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 255));
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 31));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
 }
 
