@@ -7,9 +7,11 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 
-# 必须填：main.c 里 ESP_ERROR_CHECK(init_wifi())，SSID 为空会直接 abort
-CONFIG_BADGE_WIFI_SSID="DX2.4"
-CONFIG_BADGE_WIFI_PASSWORD="bs666666"
+# Wi-Fi 凭据属于本机敏感配置，不提交到仓库。
+# 复制 sdkconfig.defaults.local.example 为 sdkconfig.defaults.local 后填写，
+# 或在 idf.py menuconfig -> Badge Player 中设置。
+CONFIG_BADGE_WIFI_SSID=""
+CONFIG_BADGE_WIFI_PASSWORD=""
 
 # 分区表：固件约 1.7MB，默认 single-app 的 factory 仅 1MB 放不下，
 # 改用自定义 partitions.csv（factory 4MB + storage 12MB）

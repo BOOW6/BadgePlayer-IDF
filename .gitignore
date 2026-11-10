@@ -71,8 +71,16 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# VS Code machine-specific workspace overrides
+# 从 BadgePlayer-IDF.code-workspace.example 复制后填写本机路径和串口
+*.code-workspace
+*.workspace
+.vscode/settings.local.json
+
+# ESP-IDF 本机配置（Wi-Fi 凭据、本机路径等），从 .example 复制后填写
+sdkconfig.defaults.local
+
 # User-specific configuration files
 *.user
-*.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
