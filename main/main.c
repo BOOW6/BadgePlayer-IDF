@@ -36,6 +36,11 @@
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_MAX_RETRIES    10
 
+// 连续读不到卡片的次数阈值，达到后才判定卡片离开。
+// 每次失败要等满 100ms 超时，再加 20ms 循环延时，5 次约 600ms，
+// 与 Arduino 版 10 x 50ms 的去抖时间相当。
+#define CARD_ABSENCE_THRESHOLD  5
+
 #ifndef CONFIG_BADGE_WIFI_SSID
 #define CONFIG_BADGE_WIFI_SSID ""
 #endif
@@ -69,11 +74,19 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     (void)arg;
     (void)event_data;
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_ERROR_CHECK(esp_wifi_connect());
+        // 回调运行在 wifi 任务上下文里，这里用 ESP_ERROR_CHECK 一旦失败
+        // 会直接 abort 整机，所以只记日志
+        esp_err_t err = esp_wifi_connect();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(err));
+        }
     } else if (event_base == WIFI_EVENT &&
                event_id == WIFI_EVENT_STA_DISCONNECTED) {
         if (s_wifi_retries++ < WIFI_MAX_RETRIES) {
-            ESP_ERROR_CHECK(esp_wifi_connect());
+            esp_err_t err = esp_wifi_connect();
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "retry connect failed: %s", esp_err_to_name(err));
+            }
         } else {
             xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
             ESP_LOGE(TAG, "Wi-Fi connection failed after %d retries",
@@ -82,6 +95,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         s_wifi_retries = 0;
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
+        ESP_LOGI(TAG, "Wi-Fi connected, got IP");
     }
 }
 
@@ -127,7 +141,7 @@ static esp_err_t init_wifi(void)
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT,
                                            pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(15000));
+                                           pdMS_TO_TICKS(10000));
     return (bits & WIFI_CONNECTED_BIT) != 0 ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
@@ -243,7 +257,17 @@ void app_main(void)
         nvs_err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_err);
-    ESP_ERROR_CHECK(init_wifi());
+
+    // WiFi 只是在线播放的前提，连不上不能让整机 abort。
+    // 原代码是 ESP_ERROR_CHECK(init_wifi())：一旦路由器不可达，
+    // init_wifi 等满 15s 返回 ESP_ERR_TIMEOUT，ESP_ERROR_CHECK 直接
+    // abort() 重启，形成无限重启循环，NFC 永远没机会初始化。
+    esp_err_t wifi_err = init_wifi();
+    if (wifi_err != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi unavailable (%s); NFC/audio will still start",
+                 esp_err_to_name(wifi_err));
+    }
+
     ESP_ERROR_CHECK(audio_player_init());
     init_motor();
 
@@ -255,6 +279,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "NFC and audio ready; present a card to play a song");
     bool card_present = false;
+    int absence_count = 0;
     char card_uid[3 * 10] = {0};
 
     while (true) {
@@ -268,28 +293,47 @@ void app_main(void)
             100);
         bool detected = (err == ESP_OK);
 
-        if (detected && !card_present) {
-            ESP_LOGI(TAG, "NFC card detected, UID length: %u", (unsigned)uid_length);
-            ESP_LOG_BUFFER_HEX(TAG, uid, uid_length);
-            uid_to_string(uid, uid_length, card_uid, sizeof(card_uid));
-            const song_entry_t *song = find_song(card_uid);
-            if (song == NULL) {
-                ESP_LOGW(TAG, "no song mapped for UID %s", card_uid);
-            } else if (audio_player_play(song->url) == ESP_OK) {
-                ESP_LOGI(TAG, "playing %s", song->name);
-                motor_clockwise();
-            } else {
-                ESP_LOGE(TAG, "failed to start %s", song->name);
+        if (detected) {
+            absence_count = 0;
+            if (!card_present) {
+                card_present = true;
+                ESP_LOGI(TAG, "NFC card detected, UID length: %u",
+                         (unsigned)uid_length);
+                ESP_LOG_BUFFER_HEX(TAG, uid, uid_length);
+                uid_to_string(uid, uid_length, card_uid, sizeof(card_uid));
+                const song_entry_t *song = find_song(card_uid);
+                if (song == NULL) {
+                    ESP_LOGW(TAG, "no song mapped for UID %s", card_uid);
+                } else if (audio_player_play(song->url) == ESP_OK) {
+                    ESP_LOGI(TAG, "playing %s", song->name);
+                    motor_clockwise();
+                } else {
+                    ESP_LOGE(TAG, "failed to start %s", song->name);
+                    motor_stop();
+                }
+            }
+        } else if (card_present) {
+            // 单次读失败不能判定卡片离开。卡片在临界距离或轻微晃动时，
+            // INLISTPASSIVETARGET 会时成功时失败，若直接翻转状态就会
+            // 反复 play/stop，把 I2S 时钟不停停摆又恢复 → 啸叫。
+            // 这里要求连续 CARD_ABSENCE_THRESHOLD 次读不到才算离开。
+            if (++absence_count >= CARD_ABSENCE_THRESHOLD) {
+                card_present = false;
+                absence_count = 0;
+                ESP_LOGI(TAG, "NFC card removed");
+                esp_err_t stop_err = audio_player_stop();
+                if (stop_err != ESP_OK) {
+                    // 这里不能用 ESP_ERROR_CHECK：stop 失败会直接 abort，
+                    // 而它只是个收尾动作，不值得把整机重启
+                    ESP_LOGW(TAG, "audio stop returned %s",
+                             esp_err_to_name(stop_err));
+                }
                 motor_stop();
             }
-        } else if (!detected && card_present) {
-            ESP_LOGI(TAG, "NFC card removed");
-            if (audio_player_is_playing()) {
-                ESP_ERROR_CHECK(audio_player_stop());
-            }
-            motor_stop();
         }
 
-        card_present = detected;
+        // 读卡成功时 pn532_read_passive_target_id 会立刻返回，
+        // 没有这个延时主循环会以几百 Hz 空转（Arduino 版有 delay(5)）
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
