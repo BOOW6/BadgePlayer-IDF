@@ -19,11 +19,15 @@ static const char *TAG = "audio_player";
 static i2s_chan_handle_t s_i2s_tx;
 static esp_asp_handle_t s_player;
 static volatile bool s_playing;
-// 当前正在播的 URL，用于"同一首歌不重复起播"的幂等判断
-static char s_current_url[256];
+// 当前正在播的 URL，用于"同一首歌不重复起播"的幂等判断。
+// 云端签名地址带 JWT 参数，实测 400~600 字节，256 会截断。
+static char s_current_url[768];
 // 输出闸门：停播时立刻关掉，即使 pipeline 没能马上停下，
 // 也保证不再有残留 PCM 被推到功放上
 static volatile bool s_output_muted = true;
+// 正在用「裸 PCM」通道播提示音。此时音乐不能起播，
+// 否则两路数据交错写同一个 I2S，出来只有噪声。
+static volatile bool s_pcm_busy;
 // 当前 I2S 时钟配置的采样率。只有它变了才需要重配时钟，
 // 每次切歌都 disable/enable 会让 BCLK 停摆再恢复，甩出一声爆音。
 static int s_current_rate = 44100;
@@ -37,6 +41,10 @@ static volatile int s_pcm_bits = 16;
 // PCB 走线耦合回输入的能量越强，停播后就越容易越过自激阈值开始啸叫。
 #define AUDIO_VOL_SHIFT  6
 #define AUDIO_VOL_LEVEL  34
+
+// 语音提示的人声音量。比音乐稍大一点：提示音多半是在「机器连不上网、
+// 用户不知道该干嘛」的时候响，听不清等于没播。
+#define PCM_VOL_LEVEL    42
 
 static int write_pcm(uint8_t *data, int size, void *ctx)
 {
@@ -112,6 +120,22 @@ static void i2s_write_silence(int ms)
 // 只靠 stop 里灌一次静音不够：pipeline 内部线程晚一点收尾、DMA 指针回卷，
 // 都可能把旧数据重新顶出来。让一个常驻任务持续喂 0，无论 pipeline 处于
 // 什么状态，I2S 上跑的都是静音。
+//
+// 踩坑（实测 2026-11-10，esp32s3 实机）：
+//   CONFIG_FREERTOS_HZ=100，一个 tick 就是 10ms，pdMS_TO_TICKS(4) 算出来是 0。
+//   vTaskDelay(0) 只让出一次 CPU、并不阻塞，而本任务优先级(1)高于空闲任务(0)，
+//   于是 CPU1 上的 IDLE1 被彻底饿死，5 秒后 task_wdt 报
+//   "IDLE1 did not reset the watchdog / CPU 1: silence_keeper"。
+//   所以这里的延时必须自己兜到至少 1 个 tick。
+static void silence_yield(void)
+{
+    TickType_t ticks = pdMS_TO_TICKS(4);
+    if (ticks == 0) {
+        ticks = 1;   // HZ=100 时 4ms < 1 tick，必须至少给 1 tick
+    }
+    vTaskDelay(ticks);
+}
+
 static void silence_keeper_task(void *arg)
 {
     (void)arg;
@@ -121,12 +145,10 @@ static void silence_keeper_task(void *arg)
         if (s_output_muted) {
             // 1024 字节 ≈ 5.3ms@48k/16bit/立体声。
             // i2s_channel_write 正常会阻塞到 DMA 有空位，但如果 I2S 已停或
-            // 缓冲满，它会立刻返回 —— 那样本任务就成了忙等死循环，
-            // task_wdt 会报 "silence_keeper did not reset the watchdog"。
-            // 所以一律再让出 4ms，保证一个 WDT 周期内必然休眠。
+            // 缓冲满，它会立刻返回 —— 那样本任务就成了忙等死循环。
             i2s_channel_write(s_i2s_tx, zeros, sizeof(zeros), &written,
                               pdMS_TO_TICKS(20));
-            vTaskDelay(pdMS_TO_TICKS(4));
+            silence_yield();
         } else {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
@@ -250,6 +272,12 @@ esp_err_t audio_player_play(const char *url)
         return ESP_ERR_INVALID_STATE;
     }
 
+    // 提示音正在播：等它播完。语音提示最长 3 秒，等 4 秒足够。
+    // 不等的话两路同时写 I2S，用户听到的是「提示音 + 音乐」的混合噪声。
+    for (int i = 0; i < 200 && s_pcm_busy; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
     // 同一首歌已经在播就直接返回。
     // 少了这一层，只要卡片状态抖一下就会重新 run 一次 pipeline，
     // 每次 run 都会在 MUSIC_INFO 里 disable/enable 一次 I2S 时钟，
@@ -345,4 +373,89 @@ esp_err_t audio_player_stop(void)
 bool audio_player_is_playing(void)
 {
     return s_playing;
+}
+
+/**
+ * 裸 PCM 直出。
+ *
+ * 和音乐播放走的是同一个 I2S 通道，但绕开 esp_audio_simple_player：
+ * 提示音必须在「没网、没文件系统」时也能响，多一层解码就多一个失败点。
+ *
+ * 两个必须处理的冲突：
+ *   1) silence_keeper 在 muted 状态下会持续往 I2S 喂 0，播之前要开闸并
+ *      让出一拍，否则它喂的 0 和我们喂的语音会交错成杂音。
+ *   2) I2S 配的是立体声槽位，单声道数据必须复制成左右两路再写，
+ *      直接写单声道会让左右声道各拿一半采样，听起来是「快进」效果。
+ */
+esp_err_t audio_player_play_pcm(const int16_t *pcm, size_t samples,
+                                int sample_rate)
+{
+    if (s_i2s_tx == NULL || pcm == NULL || samples == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (sample_rate <= 0) {
+        sample_rate = 16000;
+    }
+
+    // 音乐在播就先掐掉：插播提示音，不是混音
+    if (s_playing) {
+        audio_player_stop();
+    }
+
+    if (sample_rate != s_current_rate) {
+        i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
+        i2s_channel_disable(s_i2s_tx);
+        esp_err_t cerr = i2s_channel_reconfig_std_clock(s_i2s_tx, &clk_cfg);
+        i2s_channel_enable(s_i2s_tx);
+        if (cerr != ESP_OK) {
+            ESP_LOGE(TAG, "pcm: reconfig clock to %d failed: %s", sample_rate,
+                     esp_err_to_name(cerr));
+            return ESP_FAIL;
+        }
+        s_current_rate = sample_rate;
+        // 重配期间 DMA 被清空，先补静音避免功放收到空转噪声
+        i2s_write_silence(20);
+    }
+
+    // 裸 PCM 固定 16bit，音量缩放按 int16 处理
+    s_pcm_bits = 16;
+    s_pcm_busy = true;
+
+    s_output_muted = false;
+    // 给 silence_keeper 一个调度周期退出写循环
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    enum { CHUNK = 512 };
+    static int16_t stereo[CHUNK * 2];
+
+    size_t off = 0;
+    while (off < samples) {
+        size_t n = samples - off;
+        if (n > CHUNK) {
+            n = CHUNK;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            int16_t v = (int16_t)((pcm[off + i] * PCM_VOL_LEVEL) >>
+                                  AUDIO_VOL_SHIFT);
+            stereo[i * 2] = v;
+            stereo[i * 2 + 1] = v;
+        }
+        size_t written = 0;
+        esp_err_t werr = i2s_channel_write(s_i2s_tx, stereo,
+                                           n * 2 * sizeof(int16_t), &written,
+                                           pdMS_TO_TICKS(1000));
+        if (werr != ESP_OK) {
+            ESP_LOGW(TAG, "pcm: i2s write failed at %u/%u: %s",
+                     (unsigned)off, (unsigned)samples, esp_err_to_name(werr));
+            break;
+        }
+        off += n;
+    }
+
+    // 收尾：重新关闸并冲掉 DMA 里的残留，和音乐 stop 的做法一致，
+    // 否则最后一段语音会在 DMA 里循环重放。
+    s_output_muted = true;
+    i2s_write_silence(60);
+    s_pcm_busy = false;
+    return (off == samples) ? ESP_OK : ESP_FAIL;
 }
