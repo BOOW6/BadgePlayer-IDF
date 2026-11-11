@@ -7,16 +7,41 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 
-# Wi-Fi 凭据属于本机敏感配置，不提交到仓库。
-# 复制 sdkconfig.defaults.local.example 为 sdkconfig.defaults.local 后填写，
-# 或在 idf.py menuconfig -> Badge Player 中设置。
-CONFIG_BADGE_WIFI_SSID=""
-CONFIG_BADGE_WIFI_PASSWORD=""
-
 # 分区表：固件约 1.7MB，默认 single-app 的 factory 仅 1MB 放不下，
 # 改用自定义 partitions.csv（factory 4MB + storage 12MB）
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
+# ---------------- 蓝牙 ----------------
+# 只做外设（Peripheral），用 NimBLE 省内存。配网期间手机是 Central。
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=5120
+# 不做扫描、不做主机，关掉省内存
+# CONFIG_BT_NIMBLE_ROLE_CENTRAL is not set
+# CONFIG_BT_NIMBLE_ROLE_OBSERVER is not set
+# 不保存配对信息，配网是一次性动作，没必要占 NVS
+# CONFIG_BT_NIMBLE_NVS_PERSIST is not set
+
+# WiFi 与 BLE 共用一套射频，必须开共存
+CONFIG_SW_COEXIST_ENABLE=y
+
+# ---------------- 网络与存储 ----------------
+# main 启动时要挂 SPIFFS + 起 BLE + 建队列，默认 3584 不够
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# https 下载音频必须带根证书
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# SPIFFS 缓存音频
+CONFIG_SPIFFS_MAX_PARTITIONS=3
+
 # 控制台日志级别
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# ---------------- 业务配置（见 main/Kconfig.projbuild） ----------------
+CONFIG_BADGE_CLOUD_ENDPOINT="https://aibaji.app.workbuddy.host"
+CONFIG_BADGE_CLOUD_KEY="wbpk_HICdTD2EmCudhhwCc5Evnn_ASEVc0iHhE3eg55Pb1t7HJ2bb3vQvwJE"

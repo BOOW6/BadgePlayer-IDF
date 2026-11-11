@@ -11,6 +11,8 @@
 *.swp
 *.swo
 *.bak
+*.bak.*
+sdkconfig.bak.*
 *.tmp
 
 # Log files
