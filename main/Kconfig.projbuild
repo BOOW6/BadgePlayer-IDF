@@ -1,11 +1,16 @@
 menu "Badge Player"
 
-config BADGE_WIFI_SSID
-    string "Wi-Fi SSID"
-    default ""
+config BADGE_CLOUD_ENDPOINT
+    string "Cloud endpoint"
+    default "https://aibaji.app.workbuddy.host"
+    help
+        云端根地址。设备激活、后续拉歌单都打这个域名。
 
-config BADGE_WIFI_PASSWORD
-    string "Wi-Fi password"
-    default ""
+config BADGE_CLOUD_KEY
+    string "Cloud app key"
+    default "wbpk_HICdTD2EmCudhhwCc5Evnn_ASEVc0iHhE3eg55Pb1t7HJ2bb3vQvwJE"
+    help
+        应用访问 key（x-wb-webapp-access-key 请求头）。
+        这不是密钥，是应用标识，泄露不致命；真正的凭证是每台机自己的 secret。
 
 endmenu
