@@ -28,6 +28,7 @@ static volatile bool s_output_muted = true;
 // 正在用「裸 PCM」通道播提示音。此时音乐不能起播，
 // 否则两路数据交错写同一个 I2S，出来只有噪声。
 static volatile bool s_pcm_busy;
+static volatile bool s_paused;
 // 当前 I2S 时钟配置的采样率。只有它变了才需要重配时钟，
 // 每次切歌都 disable/enable 会让 BCLK 停摆再恢复，甩出一声爆音。
 static int s_current_rate = 44100;
@@ -41,6 +42,7 @@ static volatile int s_pcm_bits = 16;
 // PCB 走线耦合回输入的能量越强，停播后就越容易越过自激阈值开始啸叫。
 #define AUDIO_VOL_SHIFT  6
 #define AUDIO_VOL_LEVEL  34
+static volatile int s_volume_level = AUDIO_VOL_LEVEL;
 
 // 语音提示的人声音量。比音乐稍大一点：提示音多半是在「机器连不上网、
 // 用户不知道该干嘛」的时候响，听不清等于没播。
@@ -62,12 +64,12 @@ static int write_pcm(uint8_t *data, int size, void *ctx)
         if (!logged) {
             logged = true;
             ESP_LOGI(TAG, "pcm chunk: %d bytes, volume %d/64", size,
-                     AUDIO_VOL_LEVEL);
+                     s_volume_level);
         }
         int16_t *pcm = (int16_t *)(void *)data;
         int samples = size / (int)sizeof(int16_t);
         for (int i = 0; i < samples; ++i) {
-            pcm[i] = (int16_t)((pcm[i] * AUDIO_VOL_LEVEL) >> AUDIO_VOL_SHIFT);
+            pcm[i] = (int16_t)((pcm[i] * s_volume_level) >> AUDIO_VOL_SHIFT);
         }
     } else {
         static bool warned = false;
@@ -304,6 +306,7 @@ esp_err_t audio_player_play(const char *url)
     }
     strlcpy(s_current_url, url, sizeof(s_current_url));
     s_output_muted = false;
+    s_paused = false;
     return ESP_OK;
 }
 
@@ -324,6 +327,7 @@ esp_err_t audio_player_stop(void)
         ESP_LOGI(TAG, "stop: already idle (state=%d)", (int)state);
         i2s_write_silence(60);
         s_playing = false;
+        s_paused = false;
         s_current_url[0] = '\0';
         return ESP_OK;
     }
@@ -366,6 +370,7 @@ esp_err_t audio_player_stop(void)
     i2s_write_silence(60);
 
     s_playing = false;
+    s_paused = false;
     s_current_url[0] = '\0';
     return (waited >= 600) ? ESP_ERR_TIMEOUT : ESP_OK;
 }
@@ -373,6 +378,74 @@ esp_err_t audio_player_stop(void)
 bool audio_player_is_playing(void)
 {
     return s_playing;
+}
+
+esp_err_t audio_player_toggle_playback(void)
+{
+    if (s_player == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_asp_state_t state = ESP_ASP_STATE_NONE;
+    if (esp_audio_simple_player_get_state(s_player, &state) != ESP_GMF_ERR_OK) {
+        return ESP_FAIL;
+    }
+
+    if (state == ESP_ASP_STATE_RUNNING) {
+        s_output_muted = true;
+        i2s_write_silence(20);
+        esp_gmf_err_t err = esp_audio_simple_player_pause(s_player);
+        if (err != ESP_GMF_ERR_OK) {
+            s_output_muted = false;
+            return ESP_FAIL;
+        }
+        s_playing = false;
+        s_paused = true;
+        i2s_write_silence(60);
+        return ESP_OK;
+    }
+
+    if (state == ESP_ASP_STATE_PAUSED) {
+        s_output_muted = false;
+        esp_gmf_err_t err = esp_audio_simple_player_resume(s_player);
+        if (err != ESP_GMF_ERR_OK) {
+            s_output_muted = true;
+            return ESP_FAIL;
+        }
+        s_playing = true;
+        s_paused = false;
+        return ESP_OK;
+    }
+
+    return ESP_ERR_INVALID_STATE;
+}
+
+bool audio_player_is_paused(void)
+{
+    return s_paused;
+}
+
+esp_err_t audio_player_set_volume(int percent)
+{
+    if (percent < 0) {
+        percent = 0;
+    } else if (percent > 100) {
+        percent = 100;
+    }
+    s_volume_level = (percent * 64 + 50) / 100;
+    ESP_LOGI(TAG, "volume: %d%% (%d/64)", percent, s_volume_level);
+    return ESP_OK;
+}
+
+esp_err_t audio_player_adjust_volume(int delta_percent)
+{
+    int current = (int)(((int64_t)s_volume_level * 100 + 32) / 64);
+    return audio_player_set_volume(current + delta_percent);
+}
+
+int audio_player_get_volume(void)
+{
+    return (int)(((int64_t)s_volume_level * 100 + 32) / 64);
 }
 
 /**

@@ -64,6 +64,13 @@
 #define PN532_SPI_HOST      SPI2_HOST
 #define PN532_SPI_CLOCK_HZ  100000
 
+#define BUTTON_VOL_UP_GPIO   GPIO_NUM_4
+#define BUTTON_PLAY_GPIO     GPIO_NUM_5
+#define BUTTON_VOL_DOWN_GPIO GPIO_NUM_6
+#define BUTTON_DEBOUNCE_MS   30
+#define BUTTON_LONG_PRESS_MS 5000
+#define BUTTON_VOLUME_STEP   10
+
 // 连续读不到卡片的次数阈值，达到后才判定卡片离开。
 // 单次读失败不能翻转状态，否则临界距离下会反复 play/stop，I2S 时钟停摆 → 啸叫。
 #define CARD_ABSENCE_THRESHOLD  5
@@ -123,6 +130,16 @@ static int64_t       s_new_last_ms;
 static QueueHandle_t s_cmd_q;
 
 static bool s_motor_on;
+
+typedef struct {
+    gpio_num_t gpio;
+    bool raw_pressed;
+    bool stable_pressed;
+    int64_t raw_changed_ms;
+    int64_t stable_changed_ms;
+} custom_button_t;
+
+static custom_button_t s_buttons[3];
 
 // ================= 电机 =================
 static void motor_stop(void)
@@ -518,6 +535,102 @@ static void do_reset(void)
     esp_restart();
 }
 
+static void init_custom_buttons(void)
+{
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << BUTTON_VOL_UP_GPIO)
+                      | (1ULL << BUTTON_PLAY_GPIO)
+                      | (1ULL << BUTTON_VOL_DOWN_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+
+    const gpio_num_t gpios[3] = {
+        BUTTON_VOL_UP_GPIO,
+        BUTTON_PLAY_GPIO,
+        BUTTON_VOL_DOWN_GPIO,
+    };
+    for (int i = 0; i < 3; ++i) {
+        s_buttons[i].gpio = gpios[i];
+        s_buttons[i].raw_pressed = (gpio_get_level(gpios[i]) == 0);
+        s_buttons[i].stable_pressed = s_buttons[i].raw_pressed;
+        s_buttons[i].raw_changed_ms = esp_log_timestamp();
+        s_buttons[i].stable_changed_ms = esp_log_timestamp();
+    }
+}
+
+static void custom_button_task(void *arg)
+{
+    (void)arg;
+    int64_t combo_started_ms = 0;
+    bool combo_triggered = false;
+
+    while (true) {
+        int64_t now = esp_log_timestamp();
+
+        for (int i = 0; i < 3; ++i) {
+            bool raw_pressed = (gpio_get_level(s_buttons[i].gpio) == 0);
+            if (raw_pressed != s_buttons[i].raw_pressed) {
+                s_buttons[i].raw_pressed = raw_pressed;
+                s_buttons[i].raw_changed_ms = now;
+            }
+            if (raw_pressed != s_buttons[i].stable_pressed &&
+                now - s_buttons[i].raw_changed_ms >= BUTTON_DEBOUNCE_MS) {
+                bool was_pressed = s_buttons[i].stable_pressed;
+                s_buttons[i].stable_pressed = raw_pressed;
+                s_buttons[i].stable_changed_ms = now;
+
+                if (!was_pressed && raw_pressed) {
+                    ESP_LOGI(TAG, "custom button %d down", i);
+                } else if (was_pressed && !raw_pressed) {
+                    ESP_LOGI(TAG, "custom button %d up", i);
+                    if (!combo_triggered) {
+                        if (i == 0) {
+                            audio_player_adjust_volume(BUTTON_VOLUME_STEP);
+                        } else if (i == 1) {
+                            esp_err_t err = audio_player_toggle_playback();
+                            if (err != ESP_OK) {
+                                ESP_LOGW(TAG, "play/pause no active track");
+                            }
+                        } else {
+                            audio_player_adjust_volume(-BUTTON_VOLUME_STEP);
+                        }
+                    }
+                }
+            }
+        }
+
+        bool all_pressed = s_buttons[0].stable_pressed
+                        && s_buttons[1].stable_pressed
+                        && s_buttons[2].stable_pressed;
+        if (all_pressed) {
+            if (combo_started_ms == 0) {
+                combo_started_ms = now;
+            } else if (!combo_triggered &&
+                       now - combo_started_ms >= BUTTON_LONG_PRESS_MS) {
+                combo_triggered = true;
+                ESP_LOGW(TAG, "three-button config reset triggered");
+                buzz_pattern(3);
+                do_reset();
+            }
+        } else {
+            if (combo_started_ms != 0 && !all_pressed) {
+                combo_started_ms = 0;
+            }
+            if (!s_buttons[0].stable_pressed
+                && !s_buttons[1].stable_pressed
+                && !s_buttons[2].stable_pressed) {
+                combo_triggered = false;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
 static void worker_task(void *arg)
 {
     (void)arg;
@@ -820,6 +933,8 @@ void app_main(void)
 
     ESP_ERROR_CHECK(audio_player_init());
     init_motor();
+    init_custom_buttons();
+    xTaskCreate(custom_button_task, "custom_buttons", 4096, NULL, 3, NULL);
 
     // 语音提示通道复用同一条 I2S，必须排在音频初始化之后
     if (voice_init() != ESP_OK) {

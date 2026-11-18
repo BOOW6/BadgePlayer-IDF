@@ -10,6 +10,11 @@ esp_err_t audio_player_init(void);
 esp_err_t audio_player_play(const char *url);
 esp_err_t audio_player_stop(void);
 bool audio_player_is_playing(void);
+esp_err_t audio_player_toggle_playback(void);
+bool audio_player_is_paused(void);
+esp_err_t audio_player_set_volume(int percent);
+esp_err_t audio_player_adjust_volume(int delta_percent);
+int audio_player_get_volume(void);
 
 /**
  * @brief 直接推一段单声道 16bit PCM 到 I2S（用于内置语音提示）
