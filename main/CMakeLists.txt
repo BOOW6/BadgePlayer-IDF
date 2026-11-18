@@ -6,6 +6,7 @@ idf_component_register(SRCS "main.c"
                             "voice.c"
                             "voice_data.c"
                     INCLUDE_DIRS "."
+                    EMBED_FILES "voice_data.bin"
                     REQUIRES driver
                             esp-idf-pn532
                             esp_audio_simple_player

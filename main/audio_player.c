@@ -459,3 +459,78 @@ esp_err_t audio_player_play_pcm(const int16_t *pcm, size_t samples,
     s_pcm_busy = false;
     return (off == samples) ? ESP_OK : ESP_FAIL;
 }
+
+static int16_t ulaw_decode(uint8_t encoded)
+{
+    uint8_t u = (uint8_t)~encoded;
+    int32_t t = ((u & 0x0f) << 3) + 132;
+    t <<= (u >> 4) & 0x07;
+    t -= 132;
+    return (int16_t)((u & 0x80) ? -t : t);
+}
+
+esp_err_t audio_player_play_ulaw(const uint8_t *ulaw, size_t samples,
+                                 int sample_rate)
+{
+    if (s_i2s_tx == NULL || ulaw == NULL || samples == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (sample_rate <= 0) {
+        sample_rate = 8000;
+    }
+
+    if (s_playing) {
+        audio_player_stop();
+    }
+
+    if (sample_rate != s_current_rate) {
+        i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
+        i2s_channel_disable(s_i2s_tx);
+        esp_err_t cerr = i2s_channel_reconfig_std_clock(s_i2s_tx, &clk_cfg);
+        i2s_channel_enable(s_i2s_tx);
+        if (cerr != ESP_OK) {
+            ESP_LOGE(TAG, "ulaw: reconfig clock to %d failed: %s",
+                     sample_rate, esp_err_to_name(cerr));
+            return ESP_FAIL;
+        }
+        s_current_rate = sample_rate;
+        i2s_write_silence(20);
+    }
+
+    s_pcm_bits = 16;
+    s_pcm_busy = true;
+    s_output_muted = false;
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    enum { CHUNK = 512 };
+    static int16_t stereo[CHUNK * 2];
+
+    size_t off = 0;
+    while (off < samples) {
+        size_t n = samples - off;
+        if (n > CHUNK) {
+            n = CHUNK;
+        }
+        for (size_t i = 0; i < n; ++i) {
+            int16_t v = ulaw_decode(ulaw[off + i]);
+            v = (int16_t)((v * PCM_VOL_LEVEL) >> AUDIO_VOL_SHIFT);
+            stereo[i * 2] = v;
+            stereo[i * 2 + 1] = v;
+        }
+        size_t written = 0;
+        esp_err_t werr = i2s_channel_write(s_i2s_tx, stereo,
+                                           n * 2 * sizeof(int16_t), &written,
+                                           pdMS_TO_TICKS(1000));
+        if (werr != ESP_OK) {
+            ESP_LOGW(TAG, "ulaw: i2s write failed at %u/%u: %s",
+                     (unsigned)off, (unsigned)samples, esp_err_to_name(werr));
+            break;
+        }
+        off += n;
+    }
+
+    s_output_muted = true;
+    i2s_write_silence(60);
+    s_pcm_busy = false;
+    return (off == samples) ? ESP_OK : ESP_FAIL;
+}

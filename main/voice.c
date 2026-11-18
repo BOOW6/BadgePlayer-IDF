@@ -35,13 +35,13 @@ static void voice_task(void *arg)
             continue;
         }
         const voice_clip_t *c = &g_voice_clips[id];
-        if (c->pcm == NULL || c->samples == 0) {
+        if (c->ulaw == NULL || c->samples == 0) {
             continue;
         }
         s_busy = true;
         ESP_LOGI(TAG, "play #%u (%.1fs)", (unsigned)id,
                  c->samples / (float)VOICE_SAMPLE_RATE);
-        esp_err_t err = audio_player_play_pcm(c->pcm, c->samples,
+        esp_err_t err = audio_player_play_ulaw(c->ulaw, c->samples,
                                               VOICE_SAMPLE_RATE);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "play #%u failed: %s", (unsigned)id,

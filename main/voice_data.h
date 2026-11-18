@@ -2,23 +2,22 @@
  * @file voice_data.h
  * @brief 内置语音提示素材的声明
  *
- * 为什么把音频编进固件而不是放文件系统：
- *   这些提示的用途就是「连不上网的时候告诉用户怎么办」，
- *   那种状态下既没有网络也不该依赖外部存储。把 16kHz/16bit/单声道
- *   PCM 直接放进 .rodata，I2S 一推就响，不需要解码器、不需要挂文件系统。
+ * 离线语音提示素材
+ * 把 8 kHz/8bit μ-law 二进制数据嵌入固件
+ * 播放时解码为 16bit PCM，直接通过 I2S 送给 MAX98357A
  *
- * 素材由 tools/gen_voice.py 生成，改文案后重跑脚本即可。
+ * 素材由 tools/gen_voice.py 生成，改文案后重跑脚本即可
  */
 #pragma once
 
 #include <stddef.h>
 #include <stdint.h>
 
-#define VOICE_SAMPLE_RATE 16000
+#define VOICE_SAMPLE_RATE 8000
 
-/** 一段语音：单声道 16bit PCM + 采样点数 */
+/** 一段语音：单声道 8 kHz 8bit μ-law + 采样点数 */
 typedef struct {
-    const int16_t *pcm;
+    const uint8_t *ulaw;
     size_t         samples;
 } voice_clip_t;
 

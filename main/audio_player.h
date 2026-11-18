@@ -23,3 +23,7 @@ bool audio_player_is_playing(void);
  */
 esp_err_t audio_player_play_pcm(const int16_t *pcm, size_t samples,
                                 int sample_rate);
+
+/** 直接解码并推一段单声道 8 kHz 8bit μ-law 到 I2S。 */
+esp_err_t audio_player_play_ulaw(const uint8_t *ulaw, size_t samples,
+                                 int sample_rate);
